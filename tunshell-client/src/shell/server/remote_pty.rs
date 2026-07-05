@@ -13,11 +13,12 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::{CString, OsString};
 use std::fs::File as StdFile;
-use std::io;
+use std::io::{self, Write};
 use std::net::ToSocketAddrs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::prelude::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -50,6 +51,11 @@ struct RptyCommandConfig {
     ps1: &'static str,
 }
 
+enum RptyBash {
+    Path(String),
+    Memfd(StdFile),
+}
+
 impl RemotePtyShell {
     pub(super) async fn new(
         term: &str,
@@ -58,7 +64,7 @@ impl RemotePtyShell {
     ) -> Result<Self> {
         info!("creating remote pty shell");
 
-        let path = download_rpty_bash().await?;
+        let rpty_bash = download_rpty_bash().await?;
         let (sock_path, sock_listener) = create_pty_sock().await?;
 
         let command_config = RptyCommandConfig {
@@ -71,7 +77,7 @@ impl RemotePtyShell {
             },
         };
 
-        let proc = spawn_rpty_bash(&path, &command_config).await?;
+        let proc = spawn_rpty_bash(rpty_bash, &command_config).await?;
 
         let (read_tx, read_rx) = unbounded_channel();
 
@@ -278,19 +284,23 @@ impl Shell for RemotePtyShell {
     }
 }
 
-async fn spawn_rpty_bash(path: &str, config: &RptyCommandConfig) -> Result<Child> {
-    match create_rpty_command(path, config).spawn() {
-        Ok(proc) => Ok(proc),
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            warn!(
-                "failed to execute rpty bash from {}; retrying through memfd",
-                path
-            );
-            spawn_rpty_bash_memfd(path, config)
-                .await
-                .with_context(|| "Failed to start shell through memfd")
-        }
-        Err(err) => Err(Error::from(err).context("Failed to start shell")),
+async fn spawn_rpty_bash(rpty_bash: RptyBash, config: &RptyCommandConfig) -> Result<Child> {
+    match rpty_bash {
+        RptyBash::Path(path) => match create_rpty_command(&path, config).spawn() {
+            Ok(proc) => Ok(proc),
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                warn!(
+                    "failed to execute rpty bash from {}; retrying through memfd",
+                    path
+                );
+                spawn_rpty_bash_memfd(&path, config)
+                    .await
+                    .with_context(|| "Failed to start shell through memfd")
+            }
+            Err(err) => Err(Error::from(err).context("Failed to start shell")),
+        },
+        RptyBash::Memfd(memfd) => spawn_rpty_bash_memfd_file(memfd, config)
+            .with_context(|| "Failed to start shell through downloaded memfd"),
     }
 }
 
@@ -320,6 +330,10 @@ async fn spawn_rpty_bash_memfd(path: &str, config: &RptyCommandConfig) -> Result
     .await
     .context("failed to join memfd copy task")??;
 
+    spawn_rpty_bash_memfd_file(memfd, config)
+}
+
+fn spawn_rpty_bash_memfd_file(memfd: StdFile, config: &RptyCommandConfig) -> Result<Child> {
     let exec_payload = MemfdExecPayload::new(memfd, config)?;
     let mut command = Command::new("/proc/self/exe");
     command
@@ -338,14 +352,27 @@ fn copy_file_to_memfd(path: &str) -> io::Result<StdFile> {
     let mut source = StdFile::open(path)?;
     let mut memfd = create_memfd()?;
     io::copy(&mut source, &mut memfd)?;
+    make_memfd_executable(&memfd)?;
 
+    Ok(memfd)
+}
+
+fn copy_bytes_to_memfd(bytes: &[u8]) -> io::Result<StdFile> {
+    let mut memfd = create_memfd()?;
+    memfd.write_all(bytes)?;
+    make_memfd_executable(&memfd)?;
+
+    Ok(memfd)
+}
+
+fn make_memfd_executable(memfd: &StdFile) -> io::Result<()> {
     let mode = 0o700;
     let chmod_res = unsafe { libc::fchmod(memfd.as_raw_fd(), mode) };
     if chmod_res == -1 {
         return Err(io::Error::last_os_error());
     }
 
-    Ok(memfd)
+    Ok(())
 }
 
 fn create_memfd() -> io::Result<StdFile> {
@@ -457,18 +484,7 @@ fn rpty_env(config: &RptyCommandConfig) -> Result<Vec<CString>> {
         .collect()
 }
 
-async fn download_rpty_bash() -> Result<String> {
-    let tmp_dir = get_temp_dir().await?;
-    let local_path = format!("{tmp_dir}/bash-rpty");
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(local_path.clone())
-        .await
-        .map_err(|_| Error::msg("failed to open file"))?;
-
+async fn download_rpty_bash() -> Result<RptyBash> {
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "aarch64") {
@@ -537,8 +553,9 @@ async fn download_rpty_bash() -> Result<String> {
         return Err(Error::msg("failed to find content-length from response"));
     }
 
-    debug!("saving file to tmp path");
+    debug!("reading rpty bash artifact");
     let mut buff = [0u8; 1024];
+    let mut body = Vec::with_capacity(content_length as usize);
     let mut downloaded = 0;
     while downloaded < content_length {
         let n = tls.read(&mut buff).await.context("failed to read")?;
@@ -546,9 +563,7 @@ async fn download_rpty_bash() -> Result<String> {
             break;
         }
 
-        file.write_all(&buff[..n])
-            .await
-            .context("failed to write")?;
+        body.extend_from_slice(&buff[..n]);
         downloaded += n as u64;
     }
 
@@ -560,11 +575,52 @@ async fn download_rpty_bash() -> Result<String> {
 
     debug!("finished downloading file");
 
+    let local_path = get_exe_dir()
+        .map(|tmp_dir| format!("{tmp_dir}/bash-rpty"))
+        .ok();
+
+    if let Some(local_path) = local_path {
+        match save_rpty_bash_to_file(&local_path, &body).await {
+            Ok(()) => return Ok(RptyBash::Path(local_path)),
+            Err(err) => {
+                warn!(
+                    "failed to save rpty bash to {}; retrying download through memfd: {}",
+                    local_path, err
+                );
+            }
+        }
+    } else {
+        warn!("failed to find rpty bash disk cache directory; retrying download through memfd");
+    }
+
+    let memfd = tokio::task::spawn_blocking(move || copy_bytes_to_memfd(&body))
+        .await
+        .context("failed to join memfd write task")?
+        .context("failed to write downloaded rpty bash to memfd")?;
+
+    Ok(RptyBash::Memfd(memfd))
+}
+
+async fn save_rpty_bash_to_file(local_path: &str, body: &[u8]) -> Result<()> {
+    debug!("saving rpty bash to {}", local_path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(local_path)
+        .await
+        .with_context(|| format!("failed to open rpty download file {local_path}"))?;
+
+    file.write_all(body)
+        .await
+        .with_context(|| format!("failed to write rpty download file {local_path}"))?;
+
     debug!("making executable");
-    std::fs::set_permissions(local_path.clone(), std::fs::Permissions::from_mode(0o744)).unwrap();
+    std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(0o744))
+        .with_context(|| format!("failed to chmod rpty download file {local_path}"))?;
     debug!("done");
 
-    Ok(local_path)
+    Ok(())
 }
 
 async fn read_line(tls: &mut TlsStream<TcpStream>) -> Result<String> {
@@ -590,15 +646,76 @@ async fn read_line(tls: &mut TlsStream<TcpStream>) -> Result<String> {
 }
 
 async fn get_temp_dir() -> Result<String> {
+    for dir in temp_dir_candidates() {
+        match ensure_writable_dir(&dir) {
+            Ok(()) => {
+                return dir
+                    .to_str()
+                    .map(|dir| dir.to_string())
+                    .ok_or_else(|| Error::msg("failed to convert temp dir to str"));
+            }
+            Err(err) => {
+                debug!("skipping rpty temp dir {}: {}", dir.display(), err);
+            }
+        }
+    }
+
+    Err(Error::msg("could not find writable temp dir for rpty"))
+}
+
+fn get_exe_dir() -> Result<String> {
     let tmp_dir = env::current_exe().map_err(|_| Error::msg("could not get running exe path"))?;
     let tmp_dir = tmp_dir
         .parent()
         .ok_or_else(|| Error::msg("could not get path parent"))?;
     let tmp_dir = tmp_dir
         .to_str()
-        .ok_or_else(|| Error::msg("failed to convert to str"))?;
+        .ok_or_else(|| Error::msg("failed to convert exe dir to str"))?;
 
     Ok(tmp_dir.to_string())
+}
+
+fn temp_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd);
+    }
+
+    candidates.extend(
+        ["TMPDIR", "TEMP", "TMP", "XDG_RUNTIME_DIR"]
+            .iter()
+            .filter_map(env::var_os)
+            .map(PathBuf::from),
+    );
+    candidates.push(PathBuf::from("/tmp"));
+
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !unique.iter().any(|dir| dir == &candidate) {
+            unique.push(candidate);
+        }
+    }
+
+    unique
+}
+
+fn ensure_writable_dir(dir: &Path) -> io::Result<()> {
+    let probe_path = dir.join(format!(".tunshell-write-test-{}", std::process::id()));
+    let probe_file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(&probe_path)?;
+    drop(probe_file);
+    let _ = std::fs::remove_file(probe_path);
+    Ok(())
 }
 
 async fn create_pty_sock() -> Result<(String, UnixListener)> {
@@ -625,11 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_rpty_bash_memfd_executes_file() {
-        let config = RptyCommandConfig {
-            sock_path: "/tmp/tunshell-test.sock".to_string(),
-            term: "xterm".to_string(),
-            ps1: "$ ",
-        };
+        let config = test_config();
 
         let child = match spawn_rpty_bash_memfd("/bin/true", &config).await {
             Ok(child) => child,
@@ -644,6 +757,32 @@ mod tests {
         assert!(status.success());
     }
 
+    #[tokio::test]
+    async fn spawn_downloaded_rpty_bash_memfd_executes_file() {
+        let config = test_config();
+        let bytes = std::fs::read("/bin/true").expect("read test binary");
+        let memfd = match copy_bytes_to_memfd(&bytes) {
+            Ok(memfd) => memfd,
+            Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => {
+                eprintln!("skipping memfd exec test: memfd_create is unavailable");
+                return;
+            }
+            Err(err) => panic!("write memfd: {}", err),
+        };
+
+        let child = match spawn_rpty_bash_memfd_file(memfd, &config) {
+            Ok(child) => child,
+            Err(err) if error_has_errno(&err, libc::ENOSYS) => {
+                eprintln!("skipping memfd exec test: execveat is unavailable");
+                return;
+            }
+            Err(err) => panic!("spawn downloaded memfd: {}", err),
+        };
+        let status = child.await.expect("wait for child");
+
+        assert!(status.success());
+    }
+
     fn error_has_errno(err: &Error, errno: i32) -> bool {
         err.chain().any(|cause| {
             cause
@@ -651,5 +790,13 @@ mod tests {
                 .and_then(|io_error| io_error.raw_os_error())
                 == Some(errno)
         })
+    }
+
+    fn test_config() -> RptyCommandConfig {
+        RptyCommandConfig {
+            sock_path: "/tmp/tunshell-test.sock".to_string(),
+            term: "xterm".to_string(),
+            ps1: "$ ",
+        }
     }
 }
