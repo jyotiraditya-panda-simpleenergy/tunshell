@@ -42,6 +42,7 @@ pub struct RemotePtyShell {
 struct StreamingState {
     proc: Child,
     sock_listener: UnixListener,
+    sock_path: String,
     read_rx: UnboundedReceiver<(u32, Result<Vec<u8>>)>,
 }
 
@@ -68,7 +69,7 @@ impl RemotePtyShell {
         let (sock_path, sock_listener) = create_pty_sock().await?;
 
         let command_config = RptyCommandConfig {
-            sock_path,
+            sock_path: sock_path.clone(),
             term: term.to_string(),
             ps1: if color {
                 r"\[\e[0;38;5;242m\][rpty] \[\e[0;92m\]\u\[\e[0;92m\]@\[\e[0;92m\]\H\[\e[0m\]:\[\e[0;38;5;39m\]\w\[\e[0m\]\$ \[\e[0m\]"
@@ -89,6 +90,7 @@ impl RemotePtyShell {
             state: Some(StreamingState {
                 proc,
                 sock_listener,
+                sock_path,
                 read_rx,
             }),
             network_peer_config,
@@ -97,7 +99,7 @@ impl RemotePtyShell {
 
     async fn do_stream_io(mut self: Pin<&mut Self>, stream: &mut ShellStream) -> Result<()> {
         let mut state = self.state.take().unwrap();
-        let (mut network_peer, mut network_peer_rx, mut network_peer_tx) =
+        let (network_peer, mut network_peer_rx, mut network_peer_tx) =
             NetworkPeer::new(self.network_peer_config.clone(), NetworkPeerRole::Server).await;
 
         tokio::spawn(network_peer.run());
@@ -729,10 +731,18 @@ async fn create_pty_sock() -> Result<(String, UnixListener)> {
     Ok((sock_path, listener))
 }
 
+fn cleanup_pty_sock(sock_path: &str) {
+    match std::fs::remove_file(sock_path) {
+        Ok(()) => debug!("removed rpty unix sock {}", sock_path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => warn!("failed to remove rpty unix sock {}: {}", sock_path, err),
+    }
+}
+
 impl Drop for StreamingState {
     fn drop(&mut self) {
-        // we dont want the shell hanging arou
         let _ = self.proc.kill();
+        cleanup_pty_sock(&self.sock_path);
     }
 }
 
@@ -781,6 +791,19 @@ mod tests {
         let status = child.await.expect("wait for child");
 
         assert!(status.success());
+    }
+
+    #[test]
+    fn cleanup_pty_sock_removes_bound_socket_path() {
+        let sock_path =
+            std::env::temp_dir().join(format!("tunshell-cleanup-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock_path);
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&sock_path).expect("bind test unix socket");
+
+        cleanup_pty_sock(sock_path.to_str().expect("socket path utf8"));
+
+        assert!(!sock_path.exists());
     }
 
     fn error_has_errno(err: &Error, errno: i32) -> bool {
