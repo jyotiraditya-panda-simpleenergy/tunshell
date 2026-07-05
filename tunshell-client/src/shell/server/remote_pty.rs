@@ -631,11 +631,25 @@ mod tests {
             ps1: "$ ",
         };
 
-        let child = spawn_rpty_bash_memfd("/bin/true", &config)
-            .await
-            .expect("spawn through memfd");
+        let child = match spawn_rpty_bash_memfd("/bin/true", &config).await {
+            Ok(child) => child,
+            Err(err) if error_has_errno(&err, libc::ENOSYS) => {
+                eprintln!("skipping memfd exec test: memfd_create/execveat is unavailable");
+                return;
+            }
+            Err(err) => panic!("spawn through memfd: {}", err),
+        };
         let status = child.await.expect("wait for child");
 
         assert!(status.success());
+    }
+
+    fn error_has_errno(err: &Error, errno: i32) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .and_then(|io_error| io_error.raw_os_error())
+                == Some(errno)
+        })
     }
 }
