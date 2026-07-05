@@ -11,7 +11,12 @@ use futures::StreamExt;
 use log::*;
 use std::collections::HashMap;
 use std::env;
+use std::ffi::{CString, OsString};
+use std::fs::File as StdFile;
+use std::io;
 use std::net::ToSocketAddrs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::prelude::PermissionsExt;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
@@ -39,6 +44,12 @@ struct StreamingState {
     read_rx: UnboundedReceiver<(u32, Result<Vec<u8>>)>,
 }
 
+struct RptyCommandConfig {
+    sock_path: String,
+    term: String,
+    ps1: &'static str,
+}
+
 impl RemotePtyShell {
     pub(super) async fn new(
         term: &str,
@@ -50,21 +61,17 @@ impl RemotePtyShell {
         let path = download_rpty_bash().await?;
         let (sock_path, sock_listener) = create_pty_sock().await?;
 
-        let proc = Command::new(path)
-            .env("RPTY_TRANSPORT", format!("unix:{sock_path}"))
-            .env("TERM", term)
-            .env("PS1", if color { 
-                r"\[\e[0;38;5;242m\][rpty] \[\e[0;92m\]\u\[\e[0;92m\]@\[\e[0;92m\]\H\[\e[0m\]:\[\e[0;38;5;39m\]\w\[\e[0m\]\$ \[\e[0m\]" 
+        let command_config = RptyCommandConfig {
+            sock_path,
+            term: term.to_string(),
+            ps1: if color {
+                r"\[\e[0;38;5;242m\][rpty] \[\e[0;92m\]\u\[\e[0;92m\]@\[\e[0;92m\]\H\[\e[0m\]:\[\e[0;38;5;39m\]\w\[\e[0m\]\$ \[\e[0m\]"
             } else {
                 r"[rpty] \u@\H:\w\$ "
-            })
-            .arg("--noprofile")
-            .arg("--norc")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| "Failed to start shell")?;
+            },
+        };
+
+        let proc = spawn_rpty_bash(&path, &command_config).await?;
 
         let (read_tx, read_rx) = unbounded_channel();
 
@@ -271,6 +278,185 @@ impl Shell for RemotePtyShell {
     }
 }
 
+async fn spawn_rpty_bash(path: &str, config: &RptyCommandConfig) -> Result<Child> {
+    match create_rpty_command(path, config).spawn() {
+        Ok(proc) => Ok(proc),
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            warn!(
+                "failed to execute rpty bash from {}; retrying through memfd",
+                path
+            );
+            spawn_rpty_bash_memfd(path, config)
+                .await
+                .with_context(|| "Failed to start shell through memfd")
+        }
+        Err(err) => Err(Error::from(err).context("Failed to start shell")),
+    }
+}
+
+fn create_rpty_command(path: &str, config: &RptyCommandConfig) -> Command {
+    let mut command = Command::new(path);
+    configure_rpty_command(&mut command, config);
+    command
+}
+
+fn configure_rpty_command(command: &mut Command, config: &RptyCommandConfig) {
+    command
+        .env("RPTY_TRANSPORT", format!("unix:{}", config.sock_path))
+        .env("TERM", &config.term)
+        .env("PS1", config.ps1)
+        .arg("--noprofile")
+        .arg("--norc")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+}
+
+async fn spawn_rpty_bash_memfd(path: &str, config: &RptyCommandConfig) -> Result<Child> {
+    let memfd = tokio::task::spawn_blocking({
+        let path = path.to_string();
+        move || copy_file_to_memfd(&path)
+    })
+    .await
+    .context("failed to join memfd copy task")??;
+
+    let exec_payload = MemfdExecPayload::new(memfd, config)?;
+    let mut command = Command::new("/proc/self/exe");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    unsafe {
+        command.pre_exec(move || exec_payload.execveat());
+    }
+
+    command.spawn().map_err(Error::from)
+}
+
+fn copy_file_to_memfd(path: &str) -> io::Result<StdFile> {
+    let mut source = StdFile::open(path)?;
+    let mut memfd = create_memfd()?;
+    io::copy(&mut source, &mut memfd)?;
+
+    let mode = 0o700;
+    let chmod_res = unsafe { libc::fchmod(memfd.as_raw_fd(), mode) };
+    if chmod_res == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(memfd)
+}
+
+fn create_memfd() -> io::Result<StdFile> {
+    const MFD_EXEC: libc::c_uint = 0x0010;
+
+    let name = CString::new("bash-rpty").unwrap();
+    let fd = unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), MFD_EXEC) };
+    let fd = if fd == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+        unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), 0) }
+    } else {
+        fd
+    };
+
+    if fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(unsafe { StdFile::from_raw_fd(fd as libc::c_int) })
+}
+
+struct MemfdExecPayload {
+    memfd: StdFile,
+    empty_path: CString,
+    _argv: Vec<CString>,
+    _env: Vec<CString>,
+    argv_ptrs: Vec<usize>,
+    env_ptrs: Vec<usize>,
+}
+
+impl MemfdExecPayload {
+    fn new(memfd: StdFile, config: &RptyCommandConfig) -> Result<Self> {
+        let empty_path = CString::new("").unwrap();
+        let argv = vec![
+            CString::new("bash-rpty").unwrap(),
+            CString::new("--noprofile").unwrap(),
+            CString::new("--norc").unwrap(),
+        ];
+        let env = rpty_env(config)?;
+        let argv_ptrs = cstring_ptrs(&argv);
+        let env_ptrs = cstring_ptrs(&env);
+
+        Ok(Self {
+            memfd,
+            empty_path,
+            _argv: argv,
+            _env: env,
+            argv_ptrs,
+            env_ptrs,
+        })
+    }
+
+    fn execveat(&self) -> io::Result<()> {
+        const AT_EMPTY_PATH: libc::c_int = 0x1000;
+
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_execveat,
+                self.memfd.as_raw_fd(),
+                self.empty_path.as_ptr(),
+                self.argv_ptrs.as_ptr() as *const *const libc::c_char,
+                self.env_ptrs.as_ptr() as *const *const libc::c_char,
+                AT_EMPTY_PATH,
+            )
+        };
+
+        if result == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn cstring_ptrs(values: &[CString]) -> Vec<usize> {
+    let mut ptrs = values
+        .iter()
+        .map(|value| value.as_ptr() as usize)
+        .collect::<Vec<_>>();
+    ptrs.push(0);
+    ptrs
+}
+
+fn rpty_env(config: &RptyCommandConfig) -> Result<Vec<CString>> {
+    let overrides = [
+        (
+            OsString::from("RPTY_TRANSPORT"),
+            OsString::from(format!("unix:{}", config.sock_path)),
+        ),
+        (OsString::from("TERM"), OsString::from(&config.term)),
+        (OsString::from("PS1"), OsString::from(config.ps1)),
+    ];
+
+    let mut env = env::vars_os()
+        .filter(|(key, _)| {
+            !overrides
+                .iter()
+                .any(|(override_key, _)| override_key == key)
+        })
+        .collect::<Vec<_>>();
+    env.extend(overrides);
+
+    env.into_iter()
+        .map(|(key, value)| {
+            let mut bytes = key.as_os_str().as_bytes().to_vec();
+            bytes.push(b'=');
+            bytes.extend(value.as_os_str().as_bytes());
+            CString::new(bytes).context("environment variable contained nul byte")
+        })
+        .collect()
+}
+
 async fn download_rpty_bash() -> Result<String> {
     let tmp_dir = get_temp_dir().await?;
     let local_path = format!("{tmp_dir}/bash-rpty");
@@ -434,4 +620,22 @@ impl Drop for StreamingState {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_rpty_bash_memfd_executes_file() {
+        let config = RptyCommandConfig {
+            sock_path: "/tmp/tunshell-test.sock".to_string(),
+            term: "xterm".to_string(),
+            ps1: "$ ",
+        };
+
+        let child = spawn_rpty_bash_memfd("/bin/true", &config)
+            .await
+            .expect("spawn through memfd");
+        let status = child.await.expect("wait for child");
+
+        assert!(status.success());
+    }
+}
