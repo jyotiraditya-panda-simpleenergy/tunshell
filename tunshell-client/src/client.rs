@@ -15,6 +15,7 @@ pub type ClientMessageStream = MessageStream<ClientMessage, ServerMessage, Compa
 pub struct Client {
     config: Config,
     host_shell: Option<HostShell>,
+    on_connected: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Client {
@@ -22,7 +23,14 @@ impl Client {
         Self {
             config,
             host_shell: Some(host_shell),
+            on_connected: None,
         }
+    }
+
+    /// Registers a callback fired once the shell has actually started on the
+    /// target side (peer joined, key accepted, shell/pty spawned).
+    pub fn set_on_connected(&mut self, cb: impl Fn() + Send + Sync + 'static) {
+        self.on_connected = Some(Box::new(cb));
     }
 
     pub async fn println(&mut self, line: &str) {
@@ -321,9 +329,10 @@ impl Client {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn start_shell_server(&self, peer_socket: Box<dyn TunnelStream>) -> Result<u8> {
+    async fn start_shell_server(&mut self, peer_socket: Box<dyn TunnelStream>) -> Result<u8> {
         crate::ShellServer::new(ShellServerConfig {
             echo_stdout: self.config.echo_stdout(),
+            on_connected: self.on_connected.take(),
         })?
         .run(peer_socket, ShellKey::new(self.config.encryption_key()))
         .await
@@ -331,7 +340,7 @@ impl Client {
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn start_shell_server(&self, _peer_socket: Box<dyn TunnelStream>) -> Result<u8> {
+    async fn start_shell_server(&mut self, _peer_socket: Box<dyn TunnelStream>) -> Result<u8> {
         unreachable!()
     }
 

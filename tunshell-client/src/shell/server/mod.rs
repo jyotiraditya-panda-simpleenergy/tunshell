@@ -45,6 +45,7 @@ pub(crate) struct ShellServer {
 
 pub(crate) struct ShellServerConfig {
     pub(crate) echo_stdout: bool,
+    pub(crate) on_connected: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl ShellServer {
@@ -66,6 +67,10 @@ impl ShellServer {
         stream
             .write(&ShellServerMessage::ShellStarted(shell_type))
             .await?;
+
+        if let Some(cb) = &self.conf.on_connected {
+            cb();
+        }
 
         if shell.custom_io_handling() {
             shell.stream_io(&mut stream).await?;
@@ -259,7 +264,11 @@ mod tests {
     use tunshell_shared::Message;
 
     fn new_shell_server() -> ShellServer {
-        ShellServer::new(ShellServerConfig { echo_stdout: true }).unwrap()
+        ShellServer::new(ShellServerConfig {
+            echo_stdout: true,
+            on_connected: None,
+        })
+        .unwrap()
     }
 
     #[test]
