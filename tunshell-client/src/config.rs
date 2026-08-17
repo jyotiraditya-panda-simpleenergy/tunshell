@@ -24,6 +24,7 @@ pub struct Config {
     enable_direct_connection: bool,
     dangerous_disable_relay_server_verification: bool,
     network_peer_config: NetworkPeerConfig,
+    session_timeout: Option<Duration>,
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
@@ -65,6 +66,7 @@ impl Config {
             enable_direct_connection: true,
             dangerous_disable_relay_server_verification: false,
             network_peer_config: parsed_args.network_peer_config,
+            session_timeout: None,
         }
     }
 
@@ -92,6 +94,7 @@ impl Config {
             echo_stdout,
             dangerous_disable_relay_server_verification: false,
             network_peer_config,
+            session_timeout: None,
         }
     }
 
@@ -150,6 +153,14 @@ impl Config {
 
     pub fn network_peer_config(&self) -> &NetworkPeerConfig {
         &self.network_peer_config
+    }
+
+    pub fn session_timeout(&self) -> Option<Duration> {
+        self.session_timeout
+    }
+
+    pub fn set_session_timeout(&mut self, timeout: Option<Duration>) {
+        self.session_timeout = timeout;
     }
 }
 

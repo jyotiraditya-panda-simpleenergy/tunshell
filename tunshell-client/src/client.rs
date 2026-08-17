@@ -30,6 +30,16 @@ impl Client {
     }
 
     pub async fn start_session(&mut self) -> Result<u8> {
+        match self.config.session_timeout() {
+            Some(timeout) => match tokio::time::timeout(timeout, self.run_session()).await {
+                Ok(result) => result,
+                Err(_) => Err(Error::msg("session timed out")),
+            },
+            None => self.run_session().await,
+        }
+    }
+
+    async fn run_session(&mut self) -> Result<u8> {
         self.println("Connecting to relay server...").await;
         let relay_socket = ServerStream::connect(&self.config).await?;
 
