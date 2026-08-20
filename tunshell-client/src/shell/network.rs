@@ -103,6 +103,7 @@ cfg_if::cfg_if! {
             collections::HashMap,
             io,
             net::{SocketAddr, ToSocketAddrs},
+            sync::Arc,
         };
 
         use futures::{
@@ -112,11 +113,12 @@ cfg_if::cfg_if! {
         use log::debug;
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
-            net::{
-                udp::{RecvHalf as UdpRecvHalf, SendHalf as UdpSendHalf},
-                TcpListener, TcpStream, UdpSocket,
-            },
+            net::{TcpListener, TcpStream, UdpSocket},
         };
+
+        // UdpSocket::recv_from/send_to take &self, so both halves are just a shared Arc
+        type UdpRecvHalf = Arc<UdpSocket>;
+        type UdpSendHalf = Arc<UdpSocket>;
 
         use crate::shell::proto::ConId;
 
@@ -306,8 +308,8 @@ cfg_if::cfg_if! {
                     }
                 };
 
-                let socket = UdpSocket::bind(bind_addr).await?;
-                let (receiver, sender) = socket.split();
+                let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+                let (receiver, sender) = (Arc::clone(&socket), Arc::clone(&socket));
 
                 self.udp_bindings.insert(
                     con_id,
@@ -650,7 +652,7 @@ cfg_if::cfg_if! {
             use tokio::{
                 io::{AsyncReadExt, AsyncWriteExt},
                 runtime::Runtime,
-                time::{delay_for, Duration},
+                time::{sleep, Duration},
             };
 
     fn reserve_tcp_port() -> u16 {
@@ -730,7 +732,7 @@ cfg_if::cfg_if! {
                 socket.write_all(b"world").await.unwrap();
             });
 
-            delay_for(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
             client.write_all(b"hello").await.unwrap();
@@ -792,7 +794,7 @@ cfg_if::cfg_if! {
                 socket.send_to(b"pong", &addr).await.unwrap();
             });
 
-            delay_for(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let mut socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
             socket.send_to(b"ping", &SocketAddr::from(([127, 0, 0, 1], local_port))).await.unwrap();

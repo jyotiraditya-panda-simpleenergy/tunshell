@@ -1,12 +1,11 @@
 use anyhow::Error;
-use env_logger;
 use log::error;
 use std::{process::exit, sync::atomic::Ordering};
 use tokio::signal;
 use tunshell_client::{Client, Config, HostShell, STOP_ON_SIGINT};
 
 #[tokio::main]
-async fn main() -> () {
+async fn main() {
     env_logger::init();
 
     let config = Config::new_from_env();

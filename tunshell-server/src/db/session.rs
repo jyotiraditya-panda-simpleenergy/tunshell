@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::distr::Alphanumeric;
+use rand::{rng, RngExt};
 use rusqlite::{named_params, params, Connection};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -110,7 +110,7 @@ impl SessionStore {
         ",
         )?;
 
-        let mut result = statement.query_named(named_params! {":key": key})?;
+        let mut result = statement.query(named_params! {":key": key})?;
 
         let row = match result.next()? {
             Some(row) => row,
@@ -163,7 +163,7 @@ impl SessionStore {
 
 // Generates ~131 bits of entropy (22 chars) using alphanumeric charset
 pub(crate) fn generate_secure_key() -> String {
-    thread_rng().sample_iter(&Alphanumeric).take(22).collect()
+    rng().sample_iter(&Alphanumeric).take(22).map(char::from).collect()
 }
 
 #[cfg(test)]

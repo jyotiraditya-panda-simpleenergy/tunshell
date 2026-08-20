@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, ReadBuf};
 
 //// An in-memory buffer with a sync write and an async read half
 pub(super) struct ByteChannel {
@@ -27,20 +27,20 @@ impl AsyncRead for ByteChannel {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         if self.buff.len() == 0 {
             if self.shutdown {
-                return Poll::Ready(Ok(0));
+                return Poll::Ready(Ok(()));
             }
 
             self.read_wakers.push(cx.waker().clone());
             return Poll::Pending;
         }
 
-        let len = cmp::min(buf.len(), self.buff.len());
-        buf[..len].copy_from_slice(self.buff.drain(..len).collect::<Vec<u8>>().as_slice());
-        Poll::Ready(Ok(len))
+        let len = cmp::min(buf.remaining(), self.buff.len());
+        buf.put_slice(self.buff.drain(..len).collect::<Vec<u8>>().as_slice());
+        Poll::Ready(Ok(()))
     }
 }
 

@@ -24,7 +24,7 @@ pub async fn register() -> Result<BoxedFilter<(impl Reply + 'static,)>> {
                         // GET /api/info
                         warp::path("info")
                             .and(warp::get())
-                            .and_then(move || routes::get_info()),
+                            .and_then(routes::get_info),
                     ),
             )
         })

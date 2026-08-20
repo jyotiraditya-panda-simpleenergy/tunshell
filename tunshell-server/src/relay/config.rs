@@ -1,12 +1,12 @@
-use anyhow::{Error, Result};
-use rustls::{internal::pemfile, Certificate, NoClientAuth, PrivateKey, ServerConfig};
-use std::fs;
-use std::io;
+use anyhow::{Context, Result};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::ServerConfig;
 use std::{env, sync::Arc, time::Duration};
 
 const DEFAULT_CLIENT_KEY_TIMEOUT_MS: u64 = 3000;
 const DEFAULT_CLEAN_EXPIRED_CONNECTION_INTERVAL_MS: u64 = 60_000;
-const DEFAULT_WAITING_CONNECTION_EXPIRY_MS: u64 = 3600_000;
+const DEFAULT_WAITING_CONNECTION_EXPIRY_MS: u64 = 3_600_000;
 const DEFAULT_CONNECTED_CONNECTION_EXPIRY_MS: u64 = 36_000_000;
 
 #[derive(Clone)]
@@ -30,11 +30,15 @@ impl Config {
         let tls_cert_path = env::var("TLS_RELAY_CERT")?;
         let tls_key_path = env::var("TLS_RELAY_PRIVATE_KEY")?;
 
-        let mut tls_config = ServerConfig::new(NoClientAuth::new());
-        tls_config.set_single_cert(
-            Self::parse_tls_cert(tls_cert_path.clone())?,
-            Self::parse_tls_private_key(tls_key_path.clone())?,
-        )?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls_config = ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .context("failed to build tls config")?
+            .with_no_client_auth()
+            .with_single_cert(
+                Self::parse_tls_cert(tls_cert_path.clone())?,
+                Self::parse_tls_private_key(tls_key_path.clone())?,
+            )?;
         let tls_config = Arc::new(tls_config);
 
         Ok(Config {
@@ -52,21 +56,14 @@ impl Config {
         })
     }
 
-    pub(super) fn parse_tls_cert(path: String) -> Result<Vec<Certificate>> {
-        let file = fs::File::open(path)?;
-        let mut reader = io::BufReader::new(file);
-
-        pemfile::certs(&mut reader).map_err(|_| Error::msg("failed to parse tls cert file"))
+    pub(super) fn parse_tls_cert(path: String) -> Result<Vec<CertificateDer<'static>>> {
+        CertificateDer::pem_file_iter(path)?
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to parse tls cert file")
     }
 
-    pub(super) fn parse_tls_private_key(path: String) -> Result<PrivateKey> {
-        let file = fs::File::open(path)?;
-        let mut reader = io::BufReader::new(file);
-
-        let keys = pemfile::pkcs8_private_keys(&mut reader)
-            .map_err(|_| Error::msg("failed to parse tls private key file"))?;
-
-        Ok(keys.into_iter().next().unwrap())
+    pub(super) fn parse_tls_private_key(path: String) -> Result<PrivateKeyDer<'static>> {
+        PrivateKeyDer::from_pem_file(path).context("failed to parse tls private key file")
     }
 }
 

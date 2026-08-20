@@ -1,6 +1,10 @@
 use crate::Config;
 use anyhow::{bail, Context as AnyhowContext, Result};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::{
+    convert::TryFrom,
     io,
     net::ToSocketAddrs,
     pin::Pin,
@@ -9,11 +13,10 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::TcpStream,
 };
-use tokio_rustls::{client::TlsStream, rustls::ClientConfig, TlsConnector};
-use webpki::DNSNameRef;
+use tokio_rustls::{client::TlsStream, TlsConnector};
 
 pub struct TlsServerStream {
     inner: TlsStream<TcpStream>,
@@ -21,58 +24,28 @@ pub struct TlsServerStream {
 
 impl TlsServerStream {
     pub async fn connect(config: &Config, port: u16) -> Result<Self> {
-        let mut tls_config = ClientConfig::default();
-        tls_config
-            .root_store
-            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+        let mut root_store = RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls_config_builder =
+            ClientConfig::builder_with_provider(Arc::clone(&provider))
+                .with_safe_default_protocol_versions()
+                .context("failed to build tls config")?
+                .with_root_certificates(root_store);
+
+        let mut tls_config = tls_config_builder.with_no_client_auth();
 
         if config.dangerous_disable_relay_server_verification() {
-            use tokio_rustls::rustls;
-
-            struct NullCertVerifier {}
-
-            impl rustls::ServerCertVerifier for NullCertVerifier {
-                fn verify_server_cert(
-                    &self,
-                    _roots: &rustls::RootCertStore,
-                    _presented_certs: &[rustls::Certificate],
-                    _dns_name: webpki::DNSNameRef,
-                    _ocsp_response: &[u8],
-                ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
-                    Ok(rustls::ServerCertVerified::assertion())
-                }
-            }
-
             log::warn!("disabling TLS verification");
             tls_config
                 .dangerous()
-                .set_certificate_verifier(Arc::new(NullCertVerifier {}));
-        }
-
-        // For targeting CPUs without native SSE2 support (iSH emulated CPU)
-        // =================================================================
-        // The underlying crypto lib (ring) emits custom assembly for the
-        // Poly1305 authentication algorithm (https://github.com/briansmith/ring/blob/main/crypto/poly1305/asm/poly1305-x86.pl).
-        // Fortunately the AES-GCM ciphers has fallbacks in rust and can be compiled
-        // for every target (https://github.com/briansmith/ring/issues/104).
-        // So when targeting CPUs without SSE2 support we only support AES-GCM TLS ciphers.
-        #[cfg(tls_only_aes_gcm)]
-        {
-            use tokio_rustls::rustls::BulkAlgorithm;
-
-            tls_config.ciphersuites = tls_config
-                .ciphersuites
-                .iter()
-                .filter(|s| {
-                    s.bulk == BulkAlgorithm::AES_128_GCM || s.bulk == BulkAlgorithm::AES_256_GCM
-                })
-                .map(|s| *s)
-                .collect();
+                .set_certificate_verifier(Arc::new(NullCertVerifier { provider }));
         }
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
-        let relay_dns_name = DNSNameRef::try_from_ascii_str(config.relay_host())?;
+        let server_name = ServerName::try_from(config.relay_host().to_owned())?;
 
         let network_stream = if let Ok(http_proxy) = std::env::var("HTTP_PROXY") {
             log::info!("Connecting to relay server via http proxy {}", http_proxy);
@@ -88,15 +61,60 @@ impl TlsServerStream {
             TcpStream::connect(relay_addr).await?
         };
 
-        if let Err(err) = network_stream.set_keepalive(Some(Duration::from_secs(30))) {
+        let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
+        if let Err(err) = socket2::SockRef::from(&network_stream).set_tcp_keepalive(&keepalive) {
             log::warn!("failed to set tcp keepalive: {}", err);
         }
 
-        let transport_stream = connector.connect(relay_dns_name, network_stream).await?;
+        let transport_stream = connector.connect(server_name, network_stream).await?;
 
         Ok(Self {
             inner: transport_stream,
         })
+    }
+}
+
+/// Skips certificate verification entirely; used only when the caller has
+/// explicitly opted in via `dangerous_disable_relay_server_verification`.
+#[derive(Debug)]
+struct NullCertVerifier {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl ServerCertVerifier for NullCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -134,8 +152,8 @@ impl AsyncRead for TlsServerStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }

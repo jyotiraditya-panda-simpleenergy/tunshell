@@ -11,7 +11,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tunshell_shared::{Message, MessageStream, RawMessage};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,12 +29,12 @@ impl Message for EncryptedMessage {
         let mut cursor = Cursor::new(vec![]);
 
         cursor.write_u8(self.nonce.len() as u8).unwrap();
-        cursor.write(self.nonce.as_slice()).unwrap();
+        cursor.write_all(self.nonce.as_slice()).unwrap();
 
         cursor
             .write_u16::<BigEndian>(self.ciphertext.len() as u16)
             .unwrap();
-        cursor.write(self.ciphertext.as_slice()).unwrap();
+        cursor.write_all(self.ciphertext.as_slice()).unwrap();
 
         RawMessage::new(self.type_id(), cursor.into_inner())
     }
@@ -90,8 +90,8 @@ impl<S: futures::AsyncRead + futures::AsyncWrite + Unpin + Send> AsyncRead for A
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buff: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buff: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         debug!("reading from aes stream");
 
         while self.read_buff.len() == 0 {
@@ -121,7 +121,7 @@ impl<S: futures::AsyncRead + futures::AsyncWrite + Unpin + Send> AsyncRead for A
                             warn!("encountered error while reading from inner stream: {}", err);
                             return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
                         }
-                        Poll::Ready(None) => return Poll::Ready(Ok(0)),
+                        Poll::Ready(None) => return Poll::Ready(Ok(())),
                         Poll::Pending => {
                             self.decrypt = CryptoState::Pending(key);
                             return Poll::Pending;
@@ -134,12 +134,12 @@ impl<S: futures::AsyncRead + futures::AsyncWrite + Unpin + Send> AsyncRead for A
             }
         }
 
-        let read = cmp::min(buff.len(), self.read_buff.len());
+        let read = cmp::min(buff.remaining(), self.read_buff.len());
 
-        buff[..read].copy_from_slice(&self.read_buff[..read]);
+        buff.put_slice(&self.read_buff[..read]);
         self.read_buff.drain(..read);
 
-        Poll::Ready(Ok(read))
+        Poll::Ready(Ok(()))
     }
 }
 

@@ -11,7 +11,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tunshell_shared::PeerJoinedPayload;
 
@@ -25,8 +25,8 @@ impl AsyncRead for TcpConnection {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buff: &mut [u8],
-    ) -> Poll<std::result::Result<usize, std::io::Error>> {
+        buff: &mut ReadBuf<'_>,
+    ) -> Poll<std::result::Result<(), std::io::Error>> {
         Pin::new(&mut self.socket.as_mut().unwrap()).poll_read(cx, buff)
     }
 }
@@ -109,7 +109,8 @@ impl P2PConnection for TcpConnection {
             let connected_ip = self.peer_info.peer_ip_address.parse::<IpAddr>().unwrap();
 
             if peer_addr.ip() == connected_ip {
-                socket.set_keepalive(Some(Duration::from_secs(30)))?;
+                let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
+                socket2::SockRef::from(&socket).set_tcp_keepalive(&keepalive)?;
                 self.socket.replace(socket);
                 return Ok(());
             } else {
@@ -127,7 +128,7 @@ mod tests {
     use futures::FutureExt;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::{runtime::Runtime, time::delay_for};
+    use tokio::{runtime::Runtime, time::sleep};
 
     #[test]
     fn test_connect_via_connect() {
@@ -192,7 +193,7 @@ mod tests {
 
             let port = connection1.bind().await.expect("failed to bind");
 
-            let socket = delay_for(Duration::from_millis(100))
+            let socket = sleep(Duration::from_millis(100))
                 .then(|_| TcpStream::connect(format!("127.0.0.1:{}", port)))
                 .or_else(|err| futures::future::err(Error::new(err)));
 

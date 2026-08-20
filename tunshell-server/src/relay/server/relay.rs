@@ -2,7 +2,7 @@ use super::{Connection, PairedConnection};
 use anyhow::{Context as AnyhowContext, Error, Result};
 use futures::FutureExt;
 use log::*;
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{distr::Alphanumeric, rng, RngExt};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tunshell_shared::{ClientMessage, PeerJoinedPayload, PortBindings, ServerMessage};
@@ -97,7 +97,7 @@ pub(super) fn pair_connections(
 
 // 22 alphanurmeric chars ~= 131 bits of entropy
 fn generate_secure_nonce() -> String {
-    thread_rng().sample_iter(&Alphanumeric).take(22).collect()
+    rng().sample_iter(&Alphanumeric).take(22).map(char::from).collect()
 }
 
 async fn attempt_direct_connection(con1: &mut Connection, con2: &mut Connection) -> Result<bool> {
@@ -123,7 +123,7 @@ async fn attempt_direct_connection(con1: &mut Connection, con2: &mut Connection)
         (ClientMessage::DirectConnectFailed, ClientMessage::DirectConnectFailed) => {
             return Ok(false)
         }
-        msgs @ _ => {
+        msgs => {
             return Err(Error::msg(format!(
                 "unexpected message while attempting to bind for direct connection: {:?}",
                 msgs
@@ -131,25 +131,28 @@ async fn attempt_direct_connection(con1: &mut Connection, con2: &mut Connection)
         }
     };
 
-    let supports_matching_protocols = match (&ports1, &ports2) {
+    let supports_matching_protocols = matches!(
+        (&ports1, &ports2),
         (
             PortBindings {
-                tcp_port: Some(_), ..
+                tcp_port: Some(_),
+                ..
             },
             PortBindings {
-                tcp_port: Some(_), ..
+                tcp_port: Some(_),
+                ..
             },
-        ) => true,
-        (
+        ) | (
             PortBindings {
-                udp_port: Some(_), ..
+                udp_port: Some(_),
+                ..
             },
             PortBindings {
-                udp_port: Some(_), ..
+                udp_port: Some(_),
+                ..
             },
-        ) => true,
-        _ => false,
-    };
+        )
+    );
 
     if !supports_matching_protocols {
         debug!("cannot attempt direct connection due to mismatch of port binding protocols");
@@ -170,7 +173,7 @@ async fn attempt_direct_connection(con1: &mut Connection, con2: &mut Connection)
     let result = match (result1, result2) {
         (ClientMessage::DirectConnectSucceeded, ClientMessage::DirectConnectSucceeded) => true,
         (ClientMessage::DirectConnectFailed, ClientMessage::DirectConnectFailed) => false,
-        msgs @ _ => {
+        msgs => {
             return Err(Error::msg(format!(
                 "unexpected message while attempting direct connection: {:?}",
                 msgs

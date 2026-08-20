@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::mpsc,
     task::JoinHandle,
 };
@@ -53,7 +53,7 @@ impl WebSocketStream {
     // are closed after 350s. Sending a ping prevents that from occurring.
     async fn send_pings(ws: Arc<Mutex<WebSocket>>, closed: Arc<AtomicBool>) {
         loop {
-            tokio::time::delay_for(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
 
             if closed.load(Ordering::Relaxed) {
                 debug!("websocket closed, finished sending pings");
@@ -74,15 +74,15 @@ impl AsyncRead for WebSocketStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        while self.recv_buff.len() == 0 {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        while self.recv_buff.is_empty() {
             let message = {
                 let mut ws = self.ws.lock().unwrap();
 
                 let poll = Pin::new(&mut *ws).poll_next(cx);
 
-                let message = match poll {
+                match poll {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(None) => {
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)))
@@ -91,9 +91,7 @@ impl AsyncRead for WebSocketStream {
                         return Poll::Ready(Err(warp_err_to_io_err(err)))
                     }
                     Poll::Ready(Some(Ok(res))) => res,
-                };
-
-                message
+                }
             };
 
             if message.is_binary() {
@@ -106,11 +104,11 @@ impl AsyncRead for WebSocketStream {
             }
         }
 
-        let len = cmp::min(buf.len(), self.recv_buff.len());
-        buf[..len].copy_from_slice(&self.recv_buff[..len]);
+        let len = cmp::min(buf.remaining(), self.recv_buff.len());
+        buf.put_slice(&self.recv_buff[..len]);
         self.recv_buff.drain(..len);
 
-        Poll::Ready(Ok(len))
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -133,7 +131,7 @@ impl AsyncWrite for WebSocketStream {
         };
 
         let len = buf.len();
-        return Poll::Ready(
+        Poll::Ready(
             Pin::new(&mut *ws)
                 .start_send(Message::binary(buf.to_vec()))
                 .map(|_| {
@@ -141,7 +139,7 @@ impl AsyncWrite for WebSocketStream {
                     len
                 })
                 .map_err(warp_err_to_io_err),
-        );
+        )
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
@@ -166,7 +164,7 @@ impl Drop for WebSocketStream {
 }
 
 fn warp_err_to_io_err(err: warp::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
+    io::Error::other(err)
 }
 
 impl IoStream for WebSocketStream {
@@ -208,7 +206,7 @@ impl WebSocketListener {
             .and(warp::ws()) //
             .and(warp::addr::remote())
             .map(move |ws: warp::ws::Ws, addr: Option<SocketAddr>| {
-                let mut con_tx = con_tx.clone();
+                let con_tx = con_tx.clone();
 
                 ws.on_upgrade(move |websocket| async move {
                     if addr.is_none() {

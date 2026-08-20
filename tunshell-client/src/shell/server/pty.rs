@@ -74,8 +74,8 @@ impl PtyShell {
             .with_context(|| "Failed to clone pty reader")?;
         let pty_writer = pty
             .master
-            .try_clone_writer()
-            .with_context(|| "Failed to clone pty writer")?;
+            .take_writer()
+            .with_context(|| "Failed to take pty writer")?;
 
         let state = ShellState {
             shell: Arc::new(Mutex::new(shell)),
@@ -273,7 +273,7 @@ where
     let value = match rx.try_recv() {
         Ok(value) => value,
         Err(err) => match err {
-            TryRecvError::Closed => return Err(Error::msg("channel has closed")),
+            TryRecvError::Disconnected => return Err(Error::msg("channel has closed")),
             // When the channel is empty we block until the we can receive the next value
             TryRecvError::Empty => match Runtime::new().unwrap().block_on(rx.recv()) {
                 Some(value) => value,
@@ -354,7 +354,7 @@ mod tests {
             )
             .expect("Failed to initialise ShellPty");
 
-            tokio::time::delay_for(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
 
             pty.write("exit 1\n\n".as_bytes())
                 .await

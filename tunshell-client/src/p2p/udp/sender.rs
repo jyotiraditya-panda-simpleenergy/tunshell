@@ -92,7 +92,7 @@ impl SendEventReceiver {
                         Some(event) => event,
                         None => return None,
                     },
-                    _ = tokio::time::delay_for(rtt_estimate / 10) => {}
+                    _ = tokio::time::sleep(rtt_estimate / 10) => {}
                 }
             }
         }
@@ -503,7 +503,7 @@ mod tests {
                 con.update_peer_window(100);
             }
 
-            let task = match future::select(task, tokio::time::delay_for(Duration::from_millis(10))).await {
+            let task = match future::select(task, tokio::time::sleep(Duration::from_millis(10))).await {
                 Either::Left(_) => panic!("task should not complete as the packet can be sent"),
                 Either::Right((_, task)) => task
             };
@@ -516,7 +516,7 @@ mod tests {
 
             tokio::select! {
                 _ = task => {}
-                _ = tokio::time::delay_for(Duration::from_millis(10)) => panic!("task should completed as the packet can be sent"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => panic!("task should completed as the packet can be sent"),
             }
         });
     }

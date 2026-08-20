@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tunshell_shared::{ClientMessage, MessageStream, RelayPayload, ServerMessage};
 
 pub struct RelayStream<S: futures::AsyncRead + futures::AsyncWrite + Unpin> {
@@ -32,11 +32,11 @@ impl<S: futures::AsyncRead + futures::AsyncWrite + Send + Unpin> AsyncRead for R
     fn poll_read(
         mut self: Pin<&mut Self>,
         mut cx: &mut Context<'_>,
-        buff: &mut [u8],
-    ) -> Poll<StdResult<usize, IoError>> {
+        buff: &mut ReadBuf<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
         if self.closed {
             debug!("poll_read: stream closed, 0 bytes returned");
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(()));
         }
 
         if self.read_buff.len() == 0 {
@@ -80,12 +80,12 @@ impl<S: futures::AsyncRead + futures::AsyncWrite + Send + Unpin> AsyncRead for R
             };
         }
 
-        let read = std::cmp::min(buff.len(), self.read_buff.len());
-        buff[..read].copy_from_slice(&self.read_buff[..read]);
+        let read = std::cmp::min(buff.remaining(), self.read_buff.len());
+        buff.put_slice(&self.read_buff[..read]);
         self.read_buff.drain(..read);
 
         debug!("poll_read: returned {} bytes", read);
-        Poll::Ready(Ok(read))
+        Poll::Ready(Ok(()))
     }
 }
 

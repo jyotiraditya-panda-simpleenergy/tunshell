@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::compat::*;
 
 pub struct WebsocketServerStream {
@@ -42,8 +42,8 @@ impl AsyncRead for WebsocketServerStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         while self.read_buff.is_empty() {
             let msg = match self.inner.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(msg))) => msg,
@@ -51,20 +51,20 @@ impl AsyncRead for WebsocketServerStream {
                     error!("error while reading from websocket: {}", err);
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
                 }
-                Poll::Ready(None) => return Poll::Ready(Ok(0)),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
                 Poll::Pending => return Poll::Pending,
             };
 
             if msg.is_binary() {
-                self.read_buff.extend_from_slice(msg.into_data().as_slice());
+                self.read_buff.extend_from_slice(&msg.into_data());
             }
         }
 
-        let len = cmp::min(buf.len(), self.read_buff.len());
-        buf[..len].copy_from_slice(&self.read_buff[..len]);
+        let len = cmp::min(buf.remaining(), self.read_buff.len());
+        buf.put_slice(&self.read_buff[..len]);
         self.read_buff.drain(..len);
 
-        Poll::Ready(Ok(len))
+        Poll::Ready(Ok(()))
     }
 }
 

@@ -12,7 +12,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
 };
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::task::JoinHandle;
 
 /// In unix environments which do not support pty's we use this
@@ -59,12 +59,12 @@ impl FallbackShell {
     fn write_notice(&mut self) -> Result<()> {
         let mut state = self.state.inner.lock().unwrap();
 
-        state.output.write("\r\n".as_bytes())?;
-        state.output.write("NOTICE: Tunshell is running in a limited environment and is unable to allocate a pty for a real shell. ".as_bytes())?;
-        state.output.write(
+        state.output.write_all("\r\n".as_bytes())?;
+        state.output.write_all("NOTICE: Tunshell is running in a limited environment and is unable to allocate a pty for a real shell. ".as_bytes())?;
+        state.output.write_all(
             "Falling back to a built-in pseudo-shell with very limited functionality".as_bytes(),
         )?;
-        state.output.write("\r\n\r\n".as_bytes())?;
+        state.output.write_all("\r\n\r\n".as_bytes())?;
 
         Ok(())
     }
@@ -154,9 +154,13 @@ impl SharedState {
     ) -> impl Future<Output = Result<usize>> + 'a {
         futures::future::poll_fn(move |cx| {
             let mut state = self.inner.lock().unwrap();
-            let result = Pin::new(&mut state.output).poll_read(cx, buff);
+            let mut read_buf = ReadBuf::new(&mut *buff);
+            let result = Pin::new(&mut state.output).poll_read(cx, &mut read_buf);
 
-            result.map_err(Error::from)
+            result.map(|r| {
+                r.map(|_| read_buf.filled().len())
+                    .map_err(Error::from)
+            })
         })
     }
 }

@@ -41,7 +41,7 @@ cfg_if! {
         use tokio::time;
 
         pub async fn delay_for(duration: Duration) {
-            time::delay_for(duration).await
+            time::sleep(duration).await
         }
     }
 }

@@ -30,7 +30,8 @@ impl TcpServerStream {
             TcpStream::connect(relay_addr).await?
         };
 
-        if let Err(err) = network_stream.set_keepalive(Some(Duration::from_secs(30))) {
+        let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
+        if let Err(err) = socket2::SockRef::from(&network_stream).set_tcp_keepalive(&keepalive) {
             log::warn!("failed to set tcp keepalive: {}", err);
         }
 

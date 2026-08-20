@@ -82,7 +82,7 @@ impl ShellServer {
         // of any acknowledgement packets and so the client can continue to receive
         // the last message
         // Improvement: add trait method to TunnelStream wait for ack'd connection state
-        time::delay_for(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
 
         Ok(())
     }
@@ -95,7 +95,7 @@ impl ShellServer {
                 Some(Err(err)) => return Err(Error::from(err).context("received invalid message from client")),
                 None => return Err(Error::msg("client did not sent key"))
             },
-            _ = time::delay_for(Duration::from_millis(3000)) => return Err(Error::msg("timed out while waiting for key"))
+            _ = time::sleep(Duration::from_millis(3000)) => return Err(Error::msg("timed out while waiting for key"))
         };
 
         // TODO: timing safe comparison
@@ -119,7 +119,7 @@ impl ShellServer {
                 Some(Err(err)) => return Err(Error::from(err).context("received invalid message from client")),
                 None => return Err(Error::msg("client did not send start shell message"))
             },
-            _ = time::delay_for(Duration::from_millis(3000)) => return Err(Error::msg("timed out while waiting for shell request"))
+            _ = time::sleep(Duration::from_millis(3000)) => return Err(Error::msg("timed out while waiting for shell request"))
         };
 
         #[cfg(not(target_os = "ios"))]

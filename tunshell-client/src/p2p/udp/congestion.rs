@@ -223,7 +223,7 @@ mod tests {
             
             let packet = tokio::select! {
                 packet = wait_until_can_send(Arc::clone(&con), packet) => packet,
-                _ = tokio::time::delay_for(Duration::from_millis(1)) => panic!("should return from future immediately if there is sufficient window")
+                _ = tokio::time::sleep(Duration::from_millis(1)) => panic!("should return from future immediately if there is sufficient window")
             };
 
             let con = con.lock().unwrap();
@@ -252,7 +252,7 @@ mod tests {
             
             let wait_for_send = tokio::spawn(wait_until_can_send(Arc::clone(&con), packet.clone()));
 
-            tokio::time::delay_for(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             {
                 let con = con.lock().unwrap();
@@ -272,7 +272,7 @@ mod tests {
             // Task should now complete      
             let packet = tokio::select! {
                 packet = wait_for_send => packet.unwrap(),
-                _ = tokio::time::delay_for(Duration::from_millis(1)) => panic!("should return from future immediately if there is sufficient window")
+                _ = tokio::time::sleep(Duration::from_millis(1)) => panic!("should return from future immediately if there is sufficient window")
             };
 
             let con = con.lock().unwrap();

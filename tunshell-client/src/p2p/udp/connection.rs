@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -210,8 +210,8 @@ impl AsyncRead for UdpConnection {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buff: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         if !self.is_connected() {
             warn!("attempted to poll connection which is not connected");
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
@@ -228,9 +228,9 @@ impl AsyncRead for UdpConnection {
             con.recv_wakers.push(cx.waker().clone());
             return Poll::Pending;
         } else {
-            let data = con.recv_drain_bytes(buff.len());
-            buff[..data.len()].copy_from_slice(&data[..]);
-            return Poll::Ready(Ok(data.len()));
+            let data = con.recv_drain_bytes(buf.remaining());
+            buf.put_slice(&data);
+            return Poll::Ready(Ok(()));
         }
     }
 }
@@ -332,7 +332,7 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::runtime::Runtime;
-    use tokio::time::delay_for;
+    use tokio::time::sleep;
 
     lazy_static! {
         static ref UDP_PORT_NUMBER: Mutex<u16> = Mutex::from(27660);
@@ -473,7 +473,7 @@ mod tests {
             assert_eq!(con2.is_disconnected(), true);
 
             // Wait for close packet to be sent and process
-            delay_for(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await;
 
             assert_eq!(con1.is_new(), false);
             assert_eq!(con1.is_connected(), false);

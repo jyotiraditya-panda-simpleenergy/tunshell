@@ -45,7 +45,7 @@ impl TlsListener {
         mut tls: TlsAcceptor,
         mut terminate_rx: Receiver<()>,
     ) -> (JoinHandle<()>, Receiver<Result<TlsStream<TcpStream>>>) {
-        let (mut con_tx, con_rx) = mpsc::channel(128);
+        let (con_tx, con_rx) = mpsc::channel(128);
 
         let task = tokio::spawn(async move {
             loop {
@@ -54,7 +54,7 @@ impl TlsListener {
                     _ = terminate_rx.recv() => break
                 };
 
-                if let Err(_) = con_tx.send(incoming).await {
+                if con_tx.send(incoming).await.is_err() {
                     break;
                 }
             }

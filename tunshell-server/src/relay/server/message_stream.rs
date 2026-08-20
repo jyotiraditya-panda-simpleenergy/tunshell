@@ -54,7 +54,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static> ClientMessageSt
 
         match message {
             ClientMessage::Key(key) => Ok(key),
-            message @ _ => Err(Error::msg(format!(
+            message => Err(Error::msg(format!(
                 "unexpected message received from client, expecting key, got {:?}",
                 message
             ))),
@@ -95,7 +95,7 @@ fn try_send_close<IO: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static>(
             .await
             .unwrap_or_else(|err| warn!("error while sending close: {}", err));
         // Allow for final messages to be received by waiting before closing connection
-        tokio::time::delay_for(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         // TCP connection closed here
     });
 }

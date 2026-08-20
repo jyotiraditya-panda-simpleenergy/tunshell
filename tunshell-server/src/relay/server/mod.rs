@@ -15,12 +15,12 @@ mod session_validation;
 mod tls;
 mod ws;
 
-pub(self) use connection::*;
-pub(self) use message_stream::*;
-pub(self) use relay::*;
-pub(self) use session_validation::*;
-pub(self) use tls::*;
-pub(self) use ws::*;
+use connection::*;
+use message_stream::*;
+use relay::*;
+use session_validation::*;
+use tls::*;
+use ws::*;
 
 #[cfg(test)]
 mod tests;
@@ -66,7 +66,7 @@ impl<R: Reply + 'static> Server<R> {
                 accepted = &mut self.connections.new => { self.handle_accepted_connection(accepted); },
                 closed = &mut self.connections.waiting => { self.handle_closed_waiting_connection(closed); },
                 finished = &mut self.connections.paired => { self.handle_finished_connection(finished); }
-                _ = tokio::time::delay_until(next_clean_at) => {
+                _ = tokio::time::sleep_until(next_clean_at) => {
                     self.clean_expired_connections();
                     next_clean_at = tokio::time::Instant::now() + self.config.expired_connection_clean_interval;
                 }

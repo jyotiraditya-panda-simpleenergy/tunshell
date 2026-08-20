@@ -1,11 +1,11 @@
 use super::{SequenceNumber, UdpConnectionState, UdpConnectionVars, UdpPacket, UdpPacketType};
 use anyhow::{Context, Error, Result};
 use log::*;
-use rand::Rng;
+use rand::RngExt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 /// This magic string is exchanged between peers
 /// in verifying that they are both attempting to establish a connection
@@ -98,7 +98,7 @@ async fn wait_for_magic_hello(
             Ok((read, addr)) => (read, addr),
             Err(err) => return Err(Error::from(err)).context("failed to wait for magic hello packet"),
         },
-        _ = delay_for(timeout) => return Err(Error::msg("timed out while waiting for magic hello"))
+        _ = sleep(timeout) => return Err(Error::msg("timed out while waiting for magic hello"))
     };
     if &buff[..read] != MAGIC_HELLO {
         return Err(Error::msg(
@@ -123,8 +123,8 @@ async fn send_sync_packet(socket: &mut UdpSocket, con: &mut UdpConnectionVars) -
     {
         // We initialise the connection state to a random sequence number
         // and ensure the peer ack number is also initialised to the initial sequence number
-        let mut rng = rand::thread_rng();
-        con.sequence_number = SequenceNumber(rng.gen());
+        let mut rng = rand::rng();
+        con.sequence_number = SequenceNumber(rng.random());
         con.peer_ack_number = con.sequence_number;
         debug!("initialised sequence number to {}", con.sequence_number);
     }
@@ -151,7 +151,7 @@ async fn wait_for_sync_packet(
                 Ok(read) => read,
                 Err(err) => return Err(Error::from(err)).context("failed to wait for sync packet"),
             },
-            _ = delay_for(timeout) => return Err(Error::msg("timed out while waiting for sync"))
+            _ = sleep(timeout) => return Err(Error::msg("timed out while waiting for sync"))
         };
 
         // If neither of the peers are behind NAT's

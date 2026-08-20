@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tunshell_shared::PeerJoinedPayload;
 
 pub struct UdpConnectionAdaptor {
@@ -18,8 +18,8 @@ impl AsyncRead for UdpConnectionAdaptor {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buff: &mut [u8],
-    ) -> Poll<std::result::Result<usize, std::io::Error>> {
+        buff: &mut ReadBuf<'_>,
+    ) -> Poll<std::result::Result<(), std::io::Error>> {
         Pin::new(&mut self.con).poll_read(cx, buff)
     }
 }
@@ -82,7 +82,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::{runtime::Runtime, time::delay_for};
+    use tokio::{runtime::Runtime, time::sleep};
 
     #[test]
     fn test_connect_simultaneous_open() {
@@ -109,7 +109,7 @@ mod tests {
             connection1.write("hello from 1".as_bytes()).await.unwrap();
             connection1.flush().await.unwrap();
 
-            delay_for(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let mut buff = [0; 1024];
             let read = connection2.read(&mut buff).await.unwrap();
@@ -122,7 +122,7 @@ mod tests {
             connection2.write("hello from 2".as_bytes()).await.unwrap();
             connection2.flush().await.unwrap();
 
-            delay_for(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
             let mut buff = [0; 1024];
             let read = connection1.read(&mut buff).await.unwrap();
 
